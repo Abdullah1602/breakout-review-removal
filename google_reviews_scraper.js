@@ -1,12 +1,11 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
+const express = require("express");
 
+const app = express();
+const PORT = process.env.PORT || 3000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
-
-// ✅ BASE_URL built dynamically from env or default place ID
-const DEFAULT_PLACE_ID = process.env.PLACE_ID || "ChIJH8hMgj-7PIgRvtZx_hoMcuc";
-const BASE_URL = `https://search.google.com/local/reviews?placeid=${DEFAULT_PLACE_ID}`;
 
 function parseCookieText(text) {
   const cookies = [];
@@ -46,7 +45,6 @@ async function waitForReviews(page, timeout = 25000) {
   }
 }
 
-// ✅ Fix: replaced page.$x (removed in newer Puppeteer) with page.$$eval
 async function clickLowestRatingFilter(page) {
   try {
     const allClickable = await page.$$("g-chip, button, [role='tab'], [role='radio'], [role='button']");
@@ -62,7 +60,7 @@ async function clickLowestRatingFilter(page) {
       }
     }
 
-    // ✅ Fix: use page.evaluate instead of deprecated page.$x
+    // ✅ Fixed: replaced deprecated page.$x with page.evaluate
     const clicked = await page.evaluate(() => {
       const allEls = Array.from(document.querySelectorAll("*"));
       for (const el of allEls) {
@@ -252,9 +250,11 @@ function parseDate(str) {
   return 0;
 }
 
-// ✅ Fix: wrap everything in a function that runs once then exits cleanly
-async function main() {
-  console.log("Loading cookies...");
+// ✅ Core scraper function — accepts any Place ID
+async function runScraper(placeId) {
+  const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
+  console.log(`Starting scraper for place ID: ${placeId}`);
+
   let cookieText;
   if (process.env.GOOGLE_COOKIES) {
     console.log("Using cookies from environment variable");
@@ -266,7 +266,6 @@ async function main() {
   const cookies = parseCookieText(cookieText);
   console.log(`Loaded ${cookies.length} Google cookies`);
 
-  console.log("Launching browser...");
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
@@ -298,7 +297,6 @@ async function main() {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   );
 
-  console.log("Injecting cookies...");
   try {
     await page.setCookie(...cookies);
     console.log("Cookies set");
@@ -314,62 +312,70 @@ async function main() {
   console.log(`Page title: "${title}"`);
 
   if (/verify|unusual traffic|captcha/i.test(title)) {
-    console.error("CAPTCHA detected — cookies may be expired.");
     await browser.close();
-    process.exit(1);
+    throw new Error("CAPTCHA detected — cookies may be expired.");
   }
 
-  console.log("Waiting for reviews to appear...");
   await waitForReviews(page);
 
-  console.log("Clicking 'Lowest rating' sort...");
   const sorted = await clickLowestRatingFilter(page);
-  if (!sorted) {
-    console.warn("Could not apply filter. Will filter 1-star manually.");
-  }
+  if (!sorted) console.warn("Could not apply filter. Will filter 1-star manually.");
 
-  console.log("Scrolling to load all reviews...");
   await scrollToBottom(page);
-
-  console.log("Expanding all 'More' buttons...");
   await expandAllMoreButtons(page);
-
   await sleep(1500);
 
-  console.log("Extracting reviews...");
   const reviews = await extractReviews(page);
-
   const oneStarReviews = reviews.filter((r) => r.rating_stars === 1);
   console.log(`Found ${oneStarReviews.length} one-star reviews`);
-
   oneStarReviews.sort((a, b) => parseDate(b.review_date) - parseDate(a.review_date));
 
-  const output = {
+  await browser.close();
+
+  return {
     scraped_at: new Date().toISOString(),
-    place_id: DEFAULT_PLACE_ID,
+    place_id: placeId,
     filter: "1-star reviews only",
     sort: "newest first",
     total_one_star_reviews: oneStarReviews.length,
     reviews: oneStarReviews,
   };
-
-  console.log("Extracted reviews JSON:");
-  console.log(JSON.stringify(output, null, 2));
-
-  // Save locally if not on Heroku
-  if (!process.env.PUPPETEER_EXECUTABLE_PATH) {
-    fs.writeFileSync("google_reviews_1star.json", JSON.stringify(output, null, 2), "utf-8");
-    console.log("Saved to google_reviews_1star.json");
-  }
-
-  await browser.close();
-  console.log("✅ Done! Scraper finished successfully.");
-  
-  // ✅ Exit cleanly — prevents Heroku from restarting it immediately
-  process.exit(0);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err.message);
-  process.exit(1);
+// ✅ Home route — shows when you click "Open App"
+app.get("/", (req, res) => {
+  res.json({
+    status: "✅ Scraper API is running",
+    usage: "GET /scrape?placeid=YOUR_PLACE_ID",
+    example: "/scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc",
+  });
+});
+
+// ✅ Scrape route — WordPress calls this with placeid param
+app.get("/scrape", async (req, res) => {
+  const placeId = req.query.placeid;
+
+  if (!placeId) {
+    return res.status(400).json({
+      error: "Missing placeid parameter",
+      usage: "GET /scrape?placeid=YOUR_PLACE_ID",
+    });
+  }
+
+  console.log(`Scrape request received for place ID: ${placeId}`);
+
+  try {
+    const result = await runScraper(placeId);
+    console.log(`Scrape complete. Found ${result.total_one_star_reviews} one-star reviews.`);
+    res.json(result);
+  } catch (err) {
+    console.error("Scraper error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Start the web server
+app.listen(PORT, () => {
+  console.log(`✅ Scraper API running on port ${PORT}`);
+  console.log(`Test it: GET /scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc`);
 });

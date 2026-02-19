@@ -1,1 +1,1 @@
-worker: node google_reviews_scraper.js
+web: node google_reviews_scraper.js

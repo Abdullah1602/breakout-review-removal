@@ -1,0 +1,1 @@
+worker: node google_reviews_scraper.js

@@ -4,11 +4,12 @@ const path = require("path");
 
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
-const BASE_URL =
-  "http://search.google.com/local/reviews?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc";
+// ✅ Change 1: BASE_URL from environment variable (change anytime in Heroku config vars)
+const BASE_URL = process.env.BASE_URL || "https://search.google.com/local/reviews?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc";
 
-function parseCookieFile(filePath) {
-  const text = fs.readFileSync(filePath, "utf-8");
+// ✅ Change 2: parseCookieText accepts raw text (not a file path)
+// This allows cookies to come from either env variable OR local file
+function parseCookieText(text) {
   const cookies = [];
   for (const line of text.split("\n")) {
     if (!line || line.startsWith("#")) continue;
@@ -244,25 +245,40 @@ function parseDate(str) {
 }
 
 (async () => {
-  console.log("Parsing cookie file...");
-  const cookies = parseCookieFile(COOKIES_FILE);
+  // ✅ Change 3: Load cookies from GOOGLE_COOKIES env variable (Heroku) or local file (local testing)
+  console.log("Loading cookies...");
+  let cookieText;
+  if (process.env.GOOGLE_COOKIES) {
+    console.log("Using cookies from environment variable (Heroku)");
+    cookieText = process.env.GOOGLE_COOKIES;
+  } else {
+    console.log("Using cookies from local cookies.txt file");
+    cookieText = fs.readFileSync(COOKIES_FILE, "utf-8");
+  }
+  const cookies = parseCookieText(cookieText);
   console.log(`Loaded ${cookies.length} Google cookies`);
 
   console.log("Launching browser...");
   const browser = await puppeteer.launch({
-    headless: false,
+    // ✅ Change 4: headless:true for Heroku, extra args required for Linux server
+    headless: true,
     defaultViewport: null,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",   // ✅ Required on Heroku
+      "--disable-gpu",              // ✅ Required on Heroku
       "--disable-blink-features=AutomationControlled",
       "--window-size=1280,900",
       "--lang=en-US,en",
     ],
   });
 
+  // ✅ Change 5: Close the default blank tab
+  const existingPages = await browser.pages();
+  if (existingPages.length > 0) await existingPages[0].close();
+
   const page = await browser.newPage();
-  
 
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
@@ -323,15 +339,22 @@ function parseDate(str) {
 
   const output = {
     scraped_at: new Date().toISOString(),
-    place_id: "ChIJvU5RJTG7PIgR2OQuiB-0IIo",
+    place_id: "ChIJH8hMgj-7PIgRvtZx_hoMcuc",
     filter: "1-star reviews only",
     sort: "newest first",
     total_one_star_reviews: oneStarReviews.length,
     reviews: oneStarReviews,
   };
 
-  fs.writeFileSync("google_reviews_1star.json", JSON.stringify(output, null, 2), "utf-8");
-  console.log("Saved to google_reviews_1star.json");
+  // ✅ Change 6: Log the output to console as well (Heroku logs are your only output)
+  console.log("Extracted reviews JSON:");
+  console.log(JSON.stringify(output, null, 2));
+
+  // Also save locally if running on local machine
+  if (!process.env.GOOGLE_COOKIES) {
+    fs.writeFileSync("google_reviews_1star.json", JSON.stringify(output, null, 2), "utf-8");
+    console.log("Saved to google_reviews_1star.json");
+  }
 
   await browser.close();
 })();

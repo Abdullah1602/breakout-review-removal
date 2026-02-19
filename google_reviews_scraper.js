@@ -2,10 +2,14 @@ const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
+
+// ✅ In-memory job store
+const jobs = {};
 
 function parseCookieText(text) {
   const cookies = [];
@@ -31,7 +35,6 @@ function parseCookieText(text) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const humanDelay = (min = 800, max = 2000) =>
   sleep(Math.floor(Math.random() * (max - min) + min));
 
@@ -60,7 +63,6 @@ async function clickLowestRatingFilter(page) {
       }
     }
 
-    // ✅ Fixed: replaced deprecated page.$x with page.evaluate
     const clicked = await page.evaluate(() => {
       const allEls = Array.from(document.querySelectorAll("*"));
       for (const el of allEls) {
@@ -92,7 +94,6 @@ async function clickLowestRatingFilter(page) {
 async function scrollToBottom(page) {
   let lastHeight = 0;
   let unchanged = 0;
-
   while (true) {
     const newHeight = await page.evaluate(() => {
       const containers = [
@@ -106,14 +107,11 @@ async function scrollToBottom(page) {
       const container = containers.find(
         (el) => el && el.scrollHeight > window.innerHeight
       ) || document.documentElement;
-
       container.scrollBy(0, 2000);
       window.scrollBy(0, 2000);
       return Math.max(container.scrollHeight, document.body.scrollHeight);
     });
-
     await humanDelay(2000, 3500);
-
     if (newHeight === lastHeight) {
       unchanged++;
       if (unchanged >= 5) break;
@@ -126,14 +124,11 @@ async function scrollToBottom(page) {
 
 async function expandAllMoreButtons(page) {
   let totalExpanded = 0;
-
   while (true) {
     const moreLinks = await page.$$(
       'a.MtCSLb[jsaction="KoToPc"], a[aria-label*="Read more"], a[jsaction="KoToPc"]'
     );
-
     if (moreLinks.length === 0) break;
-
     let clickedThisRound = 0;
     for (const link of moreLinks) {
       try {
@@ -145,12 +140,10 @@ async function expandAllMoreButtons(page) {
         totalExpanded++;
       } catch (_) {}
     }
-
     if (clickedThisRound === 0) break;
     if (totalExpanded > 2000) break;
     await sleep(300);
   }
-
   console.log(`Expanded ${totalExpanded} "More" buttons`);
 }
 
@@ -158,7 +151,6 @@ async function extractReviews(page) {
   return page.evaluate(() => {
     const reviews = [];
     let blocks = [];
-
     const nameDivs = Array.from(document.querySelectorAll(".Vpc5Fe"));
     const seen = new Set();
     nameDivs.forEach((nameDiv) => {
@@ -178,28 +170,20 @@ async function extractReviews(page) {
         }
       }
     });
-
-    if (!blocks.length) {
-      blocks = Array.from(document.querySelectorAll("[data-review-id]"));
-    }
-    if (!blocks.length) {
-      blocks = Array.from(document.querySelectorAll("div[jscontroller='e6Mltc']"));
-    }
+    if (!blocks.length) blocks = Array.from(document.querySelectorAll("[data-review-id]"));
+    if (!blocks.length) blocks = Array.from(document.querySelectorAll("div[jscontroller='e6Mltc']"));
 
     blocks.forEach((block) => {
       const name = block.querySelector(".Vpc5Fe")?.innerText?.trim() || "";
-
       const ratingEl =
         block.querySelector('.dHX2k[role="img"]') ||
         block.querySelector('[role="img"][aria-label*="out of 5"]') ||
         block.querySelector('[role="img"][aria-label*="Rated"]') ||
         block.querySelector('[role="img"][aria-label*="star"]') ||
         block.querySelector('span[aria-label*="star"]');
-
       const ratingRaw = ratingEl?.getAttribute("aria-label") || "";
       const ratingMatch = ratingRaw.match(/(\d+(\.\d+)?)/);
       const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
-
       const textContainer = block.querySelector(".OA1nbd");
       let text = "";
       if (textContainer) {
@@ -208,9 +192,7 @@ async function extractReviews(page) {
         text = clone.innerText?.trim() || "";
         text = text.replace(/\s*[…\.]{0,3}\s*More\s*$/i, "").trim();
       }
-
       const date = block.querySelector(".y3Ibjb")?.innerText?.trim() || "";
-
       const images = [];
       block.querySelectorAll("img").forEach((img) => {
         const src = img.src || img.getAttribute("src") || "";
@@ -218,7 +200,6 @@ async function extractReviews(page) {
           images.push(src.replace(/=s\d+(-[^&]*)?$/, "=s1600-p-k-rw"));
         }
       });
-
       if (name || text) {
         reviews.push({
           reviewer_name: name,
@@ -230,7 +211,6 @@ async function extractReviews(page) {
         });
       }
     });
-
     return reviews;
   });
 }
@@ -250,21 +230,19 @@ function parseDate(str) {
   return 0;
 }
 
-// ✅ Core scraper function — accepts any Place ID
-async function runScraper(placeId) {
+// ✅ Core scraper runs in background
+async function runScraper(placeId, jobId) {
   const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
-  console.log(`Starting scraper for place ID: ${placeId}`);
+  console.log(`[Job ${jobId}] Starting scraper for place ID: ${placeId}`);
 
   let cookieText;
   if (process.env.GOOGLE_COOKIES) {
-    console.log("Using cookies from environment variable");
     cookieText = process.env.GOOGLE_COOKIES;
   } else {
-    console.log("Using cookies from local cookies.txt file");
     cookieText = fs.readFileSync(COOKIES_FILE, "utf-8");
   }
   const cookies = parseCookieText(cookieText);
-  console.log(`Loaded ${cookies.length} Google cookies`);
+  console.log(`[Job ${jobId}] Loaded ${cookies.length} Google cookies`);
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -280,7 +258,6 @@ async function runScraper(placeId) {
     ],
   });
 
-  // Close default blank tab
   const existingPages = await browser.pages();
   if (existingPages.length > 0) await existingPages[0].close();
 
@@ -299,17 +276,15 @@ async function runScraper(placeId) {
 
   try {
     await page.setCookie(...cookies);
-    console.log("Cookies set");
   } catch (e) {
-    console.warn("Some cookies failed:", e.message);
+    console.warn(`[Job ${jobId}] Some cookies failed:`, e.message);
   }
 
-  console.log(`Navigating to: ${BASE_URL}`);
   await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
   await humanDelay(3000, 5000);
 
   const title = await page.title();
-  console.log(`Page title: "${title}"`);
+  console.log(`[Job ${jobId}] Page title: "${title}"`);
 
   if (/verify|unusual traffic|captcha/i.test(title)) {
     await browser.close();
@@ -317,17 +292,13 @@ async function runScraper(placeId) {
   }
 
   await waitForReviews(page);
-
-  const sorted = await clickLowestRatingFilter(page);
-  if (!sorted) console.warn("Could not apply filter. Will filter 1-star manually.");
-
+  await clickLowestRatingFilter(page);
   await scrollToBottom(page);
   await expandAllMoreButtons(page);
   await sleep(1500);
 
   const reviews = await extractReviews(page);
   const oneStarReviews = reviews.filter((r) => r.rating_stars === 1);
-  console.log(`Found ${oneStarReviews.length} one-star reviews`);
   oneStarReviews.sort((a, b) => parseDate(b.review_date) - parseDate(a.review_date));
 
   await browser.close();
@@ -342,16 +313,20 @@ async function runScraper(placeId) {
   };
 }
 
-// ✅ Home route — shows when you click "Open App"
+// ✅ Home — shows API info
 app.get("/", (req, res) => {
   res.json({
     status: "✅ Scraper API is running",
-    usage: "GET /scrape?placeid=YOUR_PLACE_ID",
-    example: "/scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc",
+    how_to_use: [
+      "Step 1: POST or GET /scrape?placeid=YOUR_PLACE_ID — starts scraping, returns a job_id immediately",
+      "Step 2: GET /result/:job_id — poll this every 10 seconds until status is 'done'",
+    ],
+    example_scrape: "/scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc",
+    example_result: "/result/YOUR_JOB_ID",
   });
 });
 
-// ✅ Scrape route — WordPress calls this with placeid param
+// ✅ Start scrape — returns job ID immediately (no timeout!)
 app.get("/scrape", async (req, res) => {
   const placeId = req.query.placeid;
 
@@ -362,20 +337,45 @@ app.get("/scrape", async (req, res) => {
     });
   }
 
-  console.log(`Scrape request received for place ID: ${placeId}`);
+  // Generate unique job ID
+  const jobId = crypto.randomBytes(8).toString("hex");
 
-  try {
-    const result = await runScraper(placeId);
-    console.log(`Scrape complete. Found ${result.total_one_star_reviews} one-star reviews.`);
-    res.json(result);
-  } catch (err) {
-    console.error("Scraper error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  // Store job as pending
+  jobs[jobId] = { status: "pending", place_id: placeId, started_at: new Date().toISOString() };
+
+  // ✅ Return job ID immediately — no waiting!
+  res.json({
+    job_id: jobId,
+    status: "pending",
+    message: "Scraping started! Poll /result/" + jobId + " every 10 seconds for results.",
+    result_url: `/result/${jobId}`,
+  });
+
+  // Run scraper in background
+  runScraper(placeId, jobId)
+    .then((result) => {
+      jobs[jobId] = { status: "done", ...result };
+      console.log(`[Job ${jobId}] ✅ Complete! Found ${result.total_one_star_reviews} reviews.`);
+    })
+    .catch((err) => {
+      jobs[jobId] = { status: "error", error: err.message };
+      console.error(`[Job ${jobId}] ❌ Error:`, err.message);
+    });
 });
 
-// ✅ Start the web server
+// ✅ Poll for results
+app.get("/result/:jobId", (req, res) => {
+  const job = jobs[req.params.jobId];
+
+  if (!job) {
+    return res.status(404).json({ error: "Job not found. It may have expired." });
+  }
+
+  res.json(job);
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Scraper API running on port ${PORT}`);
-  console.log(`Test it: GET /scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc`);
+  console.log(`Step 1: GET /scrape?placeid=YOUR_PLACE_ID`);
+  console.log(`Step 2: GET /result/:job_id`);
 });

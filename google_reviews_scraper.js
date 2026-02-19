@@ -260,14 +260,13 @@ function parseDate(str) {
 
   console.log("Launching browser...");
   const browser = await puppeteer.launch({
-    // ✅ Change 4: headless:true for Heroku, extra args required for Linux server
     headless: true,
-    defaultViewport: null,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",   // ✅ Required on Heroku
-      "--disable-gpu",              // ✅ Required on Heroku
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
       "--disable-blink-features=AutomationControlled",
       "--window-size=1280,900",
       "--lang=en-US,en",

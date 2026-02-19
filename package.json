@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "google_reviews_scraper.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node google_reviews_scraper.js"
   },
   "keywords": [],
   "author": "",

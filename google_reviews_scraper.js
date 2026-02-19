@@ -4,11 +4,10 @@ const path = require("path");
 
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
-// ✅ Change 1: BASE_URL from environment variable (change anytime in Heroku config vars)
-const BASE_URL = process.env.BASE_URL || "https://search.google.com/local/reviews?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc";
+// ✅ BASE_URL built dynamically from env or default place ID
+const DEFAULT_PLACE_ID = process.env.PLACE_ID || "ChIJH8hMgj-7PIgRvtZx_hoMcuc";
+const BASE_URL = `https://search.google.com/local/reviews?placeid=${DEFAULT_PLACE_ID}`;
 
-// ✅ Change 2: parseCookieText accepts raw text (not a file path)
-// This allows cookies to come from either env variable OR local file
 function parseCookieText(text) {
   const cookies = [];
   for (const line of text.split("\n")) {
@@ -47,6 +46,7 @@ async function waitForReviews(page, timeout = 25000) {
   }
 }
 
+// ✅ Fix: replaced page.$x (removed in newer Puppeteer) with page.$$eval
 async function clickLowestRatingFilter(page) {
   try {
     const allClickable = await page.$$("g-chip, button, [role='tab'], [role='radio'], [role='button']");
@@ -62,13 +62,21 @@ async function clickLowestRatingFilter(page) {
       }
     }
 
-    const [btn] = await page.$x(
-      '//*[contains(translate(normalize-space(.),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"lowest rating")]'
-    );
-    if (btn) {
-      const text = await btn.evaluate((n) => n.textContent.trim());
-      console.log(`XPath found: "${text}"`);
-      await btn.click();
+    // ✅ Fix: use page.evaluate instead of deprecated page.$x
+    const clicked = await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll("*"));
+      for (const el of allEls) {
+        const text = (el.innerText || el.textContent || "").trim().toLowerCase();
+        if (text === "lowest rating" && el.children.length === 0) {
+          el.click();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (clicked) {
+      console.log("Clicked lowest rating via evaluate");
       await page.waitForNetworkIdle({ timeout: 12000 }).catch(() => {});
       await sleep(3000);
       await waitForReviews(page);
@@ -244,12 +252,12 @@ function parseDate(str) {
   return 0;
 }
 
-(async () => {
-  // ✅ Change 3: Load cookies from GOOGLE_COOKIES env variable (Heroku) or local file (local testing)
+// ✅ Fix: wrap everything in a function that runs once then exits cleanly
+async function main() {
   console.log("Loading cookies...");
   let cookieText;
   if (process.env.GOOGLE_COOKIES) {
-    console.log("Using cookies from environment variable (Heroku)");
+    console.log("Using cookies from environment variable");
     cookieText = process.env.GOOGLE_COOKIES;
   } else {
     console.log("Using cookies from local cookies.txt file");
@@ -273,7 +281,7 @@ function parseDate(str) {
     ],
   });
 
-  // ✅ Change 5: Close the default blank tab
+  // Close default blank tab
   const existingPages = await browser.pages();
   if (existingPages.length > 0) await existingPages[0].close();
 
@@ -298,7 +306,7 @@ function parseDate(str) {
     console.warn("Some cookies failed:", e.message);
   }
 
-  console.log("Navigating to reviews page...");
+  console.log(`Navigating to: ${BASE_URL}`);
   await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
   await humanDelay(3000, 5000);
 
@@ -323,7 +331,7 @@ function parseDate(str) {
   console.log("Scrolling to load all reviews...");
   await scrollToBottom(page);
 
-  console.log("Expanding all 'More' buttons for full review text...");
+  console.log("Expanding all 'More' buttons...");
   await expandAllMoreButtons(page);
 
   await sleep(1500);
@@ -338,22 +346,30 @@ function parseDate(str) {
 
   const output = {
     scraped_at: new Date().toISOString(),
-    place_id: "ChIJH8hMgj-7PIgRvtZx_hoMcuc",
+    place_id: DEFAULT_PLACE_ID,
     filter: "1-star reviews only",
     sort: "newest first",
     total_one_star_reviews: oneStarReviews.length,
     reviews: oneStarReviews,
   };
 
-  // ✅ Change 6: Log the output to console as well (Heroku logs are your only output)
   console.log("Extracted reviews JSON:");
   console.log(JSON.stringify(output, null, 2));
 
-  // Also save locally if running on local machine
-  if (!process.env.GOOGLE_COOKIES) {
+  // Save locally if not on Heroku
+  if (!process.env.PUPPETEER_EXECUTABLE_PATH) {
     fs.writeFileSync("google_reviews_1star.json", JSON.stringify(output, null, 2), "utf-8");
     console.log("Saved to google_reviews_1star.json");
   }
 
   await browser.close();
-})();
+  console.log("✅ Done! Scraper finished successfully.");
+  
+  // ✅ Exit cleanly — prevents Heroku from restarting it immediately
+  process.exit(0);
+}
+
+main().catch((err) => {
+  console.error("Fatal error:", err.message);
+  process.exit(1);
+});

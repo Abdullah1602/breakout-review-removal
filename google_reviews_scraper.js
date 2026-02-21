@@ -8,8 +8,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
+// Admin password to protect /update-cookies page
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
 // ✅ In-memory job store
 const jobs = {};
+
+// ✅ In-memory cookie override (set via /update-cookies form)
+let cookieOverride = null;
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
 function parseCookieText(text) {
   const cookies = [];
@@ -32,6 +41,20 @@ function parseCookieText(text) {
     });
   }
   return cookies;
+}
+
+// ✅ Cookie loader — checks 3 sources in order
+function loadCookies() {
+  if (cookieOverride) {
+    console.log("Using cookies from web form update");
+    return parseCookieText(cookieOverride);
+  }
+  if (process.env.GOOGLE_COOKIES) {
+    console.log("Using cookies from GOOGLE_COOKIES env var (Heroku Config Vars)");
+    return parseCookieText(process.env.GOOGLE_COOKIES);
+  }
+  console.log("Using cookies from local cookies.txt file");
+  return parseCookieText(fs.readFileSync(COOKIES_FILE, "utf-8"));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -235,13 +258,7 @@ async function runScraper(placeId, jobId) {
   const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
   console.log(`[Job ${jobId}] Starting scraper for place ID: ${placeId}`);
 
-  let cookieText;
-  if (process.env.GOOGLE_COOKIES) {
-    cookieText = process.env.GOOGLE_COOKIES;
-  } else {
-    cookieText = fs.readFileSync(COOKIES_FILE, "utf-8");
-  }
-  const cookies = parseCookieText(cookieText);
+  const cookies = loadCookies();
   console.log(`[Job ${jobId}] Loaded ${cookies.length} Google cookies`);
 
   const browser = await puppeteer.launch({
@@ -288,7 +305,7 @@ async function runScraper(placeId, jobId) {
 
   if (/verify|unusual traffic|captcha/i.test(title)) {
     await browser.close();
-    throw new Error("CAPTCHA detected — cookies may be expired.");
+    throw new Error("CAPTCHA detected — cookies may be expired. Update at /update-cookies");
   }
 
   await waitForReviews(page);
@@ -313,23 +330,26 @@ async function runScraper(placeId, jobId) {
   };
 }
 
-// ✅ Home — shows API info
+// ============================================================
+// ROUTES
+// ============================================================
+
+// ✅ Home
 app.get("/", (req, res) => {
   res.json({
     status: "✅ Scraper API is running",
-    how_to_use: [
-      "Step 1: POST or GET /scrape?placeid=YOUR_PLACE_ID — starts scraping, returns a job_id immediately",
-      "Step 2: GET /result/:job_id — poll this every 10 seconds until status is 'done'",
-    ],
-    example_scrape: "/scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc",
-    example_result: "/result/YOUR_JOB_ID",
+    endpoints: {
+      scrape: "GET /scrape?placeid=YOUR_PLACE_ID",
+      result: "GET /result/:job_id",
+      update_cookies: "GET /update-cookies (admin only)",
+    },
+    example: "/scrape?placeid=ChIJH8hMgj-7PIgRvtZx_hoMcuc",
   });
 });
 
-// ✅ Start scrape — returns job ID immediately (no timeout!)
+// ✅ Start scrape job
 app.get("/scrape", async (req, res) => {
   const placeId = req.query.placeid;
-
   if (!placeId) {
     return res.status(400).json({
       error: "Missing placeid parameter",
@@ -337,21 +357,16 @@ app.get("/scrape", async (req, res) => {
     });
   }
 
-  // Generate unique job ID
   const jobId = crypto.randomBytes(8).toString("hex");
-
-  // Store job as pending
   jobs[jobId] = { status: "pending", place_id: placeId, started_at: new Date().toISOString() };
 
-  // ✅ Return job ID immediately — no waiting!
   res.json({
     job_id: jobId,
     status: "pending",
-    message: "Scraping started! Poll /result/" + jobId + " every 10 seconds for results.",
+    message: "Scraping started! Poll /result/" + jobId + " every 10 seconds.",
     result_url: `/result/${jobId}`,
   });
 
-  // Run scraper in background
   runScraper(placeId, jobId)
     .then((result) => {
       jobs[jobId] = { status: "done", ...result };
@@ -363,19 +378,135 @@ app.get("/scrape", async (req, res) => {
     });
 });
 
-// ✅ Poll for results
+// ✅ Poll result
 app.get("/result/:jobId", (req, res) => {
   const job = jobs[req.params.jobId];
+  if (!job) return res.status(404).json({ error: "Job not found." });
+  res.json(job);
+});
 
-  if (!job) {
-    return res.status(404).json({ error: "Job not found. It may have expired." });
+// ✅ Cookie update page (GET - show form)
+app.get("/update-cookies", (req, res) => {
+  const currentCookies = loadCookies();
+  const source = cookieOverride
+    ? "web form (memory)"
+    : process.env.GOOGLE_COOKIES
+    ? "Heroku Config Var (GOOGLE_COOKIES)"
+    : "cookies.txt file (GitHub)";
+
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Update Google Cookies</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: white; border-radius: 16px; padding: 32px; max-width: 620px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+    h1 { font-size: 22px; color: #333; margin-bottom: 6px; }
+    .subtitle { color: #888; font-size: 14px; margin-bottom: 24px; }
+    .status { background: #e8f5e9; border: 1px solid #66bb6a; color: #2e7d32; padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; }
+    label { display: block; font-size: 14px; font-weight: 600; color: #444; margin-bottom: 6px; margin-top: 16px; }
+    input[type=password] { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; outline: none; }
+    input[type=password]:focus { border-color: #4285F4; }
+    textarea { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 12px; font-family: monospace; height: 200px; resize: vertical; outline: none; margin-top: 6px; }
+    textarea:focus { border-color: #4285F4; }
+    button { width: 100%; padding: 14px; background: #4285F4; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 20px; }
+    button:hover { background: #3367d6; }
+    .steps { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 13px; color: #555; line-height: 2; }
+    .steps strong { color: #333; }
+    a { color: #4285F4; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🍪 Update Google Cookies</h1>
+    <p class="subtitle">Update cookies when scraping stops working</p>
+
+    <div class="status">
+      ✅ Currently active: <strong>${currentCookies.length} Google cookies</strong><br>
+      📂 Source: <strong>${source}</strong>
+    </div>
+
+    <div class="steps">
+      <strong>How to get fresh cookies:</strong><br>
+      1. Open Chrome → go to <a href="https://google.com" target="_blank">google.com</a> — make sure you're logged in<br>
+      2. Install <strong>Cookie-Editor</strong> Chrome extension<br>
+      3. Click extension icon → <strong>Export</strong> → select <strong>Netscape</strong> format<br>
+      4. Copy all the text and paste it below
+    </div>
+
+    <form method="POST" action="/update-cookies">
+      <label>Admin Password</label>
+      <input type="password" name="password" placeholder="Enter admin password" required />
+
+      <label>Paste New Cookies (Netscape format)</label>
+      <textarea name="cookies" placeholder="# Netscape HTTP Cookie File&#10;.google.com	TRUE	/	TRUE	..."></textarea>
+
+      <button type="submit">✅ Update Cookies Now</button>
+    </form>
+  </div>
+</body>
+</html>
+  `);
+});
+
+// ✅ Cookie update (POST - save cookies to memory)
+app.post("/update-cookies", (req, res) => {
+  const { password, cookies } = req.body;
+
+  if (password !== ADMIN_PASSWORD) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h2 style="color:red">❌ Wrong password</h2>
+        <a href="/update-cookies">← Try again</a>
+      </body></html>
+    `);
   }
 
-  res.json(job);
+  if (!cookies || cookies.trim().length < 50) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h2 style="color:red">❌ No cookies provided</h2>
+        <a href="/update-cookies">← Try again</a>
+      </body></html>
+    `);
+  }
+
+  const parsed = parseCookieText(cookies);
+
+  if (parsed.length === 0) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h2 style="color:red">❌ No valid Google cookies found</h2>
+        <p>Make sure you exported in Netscape format and are logged into Google.</p>
+        <a href="/update-cookies">← Try again</a>
+      </body></html>
+    `);
+  }
+
+  cookieOverride = cookies;
+  console.log(`✅ Cookies updated via web form! ${parsed.length} Google cookies now active.`);
+
+  res.send(`
+    <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+      <h2 style="color:green">✅ Cookies updated successfully!</h2>
+      <p style="margin:12px 0;color:#555">${parsed.length} Google cookies are now active.</p>
+      <p style="color:#f57c00;font-size:13px;margin-top:12px">
+        ⚠️ These cookies are in memory only.<br>
+        For permanent storage: copy the cookie text into<br>
+        <strong>Heroku → Settings → Config Vars → GOOGLE_COOKIES</strong>
+      </p>
+      <br>
+      <a href="/" style="color:#4285F4">← Back to API</a>
+    </body></html>
+  `);
 });
 
 app.listen(PORT, () => {
   console.log(`✅ Scraper API running on port ${PORT}`);
   console.log(`Step 1: GET /scrape?placeid=YOUR_PLACE_ID`);
   console.log(`Step 2: GET /result/:job_id`);
+  console.log(`Admin:  GET /update-cookies (password: ${ADMIN_PASSWORD})`);
 });

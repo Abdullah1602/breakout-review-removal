@@ -1,4 +1,3 @@
-// Load .env for local development (ignored on Heroku)
 try { require("dotenv").config(); } catch (_) {}
 
 const puppeteer = require("puppeteer");
@@ -11,13 +10,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
-// Admin password to protect /update-cookies page
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-// ✅ In-memory job store
 const jobs = {};
 
-// ✅ In-memory cookie override (set via /update-cookies form)
 let cookieOverride = null;
 
 app.use(express.urlencoded({ extended: true }));
@@ -46,7 +42,6 @@ function parseCookieText(text) {
   return cookies;
 }
 
-// ✅ Cookie loader — checks 3 sources in order
 function loadCookies() {
   if (cookieOverride) {
     console.log("Using cookies from web form update");
@@ -117,57 +112,35 @@ async function clickLowestRatingFilter(page) {
   }
 }
 
-async function scrollToBottom(page, maxReviews = 200) {
-  let lastCount = 0;
+async function scrollToBottom(page) {
+  let lastHeight = 0;
   let unchanged = 0;
-
   while (true) {
-    const newCount = await page.evaluate(() => {
-      const selectors = [
-        "div[jsname='Wye04d']",
-        "div[jsname='ScCUV']",
-        ".review-dialog-list",
-        "c-wiz",
+    const newHeight = await page.evaluate(() => {
+      const containers = [
+        document.querySelector("div[role='main']"),
+        document.querySelector(".review-dialog-list"),
+        document.querySelector("[jsname='Wye04d']"),
+        document.querySelector("[jsname='ScCUV']"),
+        document.querySelector("c-wiz"),
+        document.documentElement,
       ];
-      let scrolled = false;
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.scrollHeight > el.clientHeight + 100) {
-          el.scrollBy(0, 3000);
-          scrolled = true;
-          break;
-        }
-      }
-      if (!scrolled) {
-        const allDivs = Array.from(document.querySelectorAll("div"));
-        for (const div of allDivs) {
-          if (div.scrollHeight > div.clientHeight + 500 && div.clientHeight > 300) {
-            div.scrollBy(0, 3000);
-            break;
-          }
-        }
-      }
-      window.scrollBy(0, 3000);
-      return document.querySelectorAll(".Vpc5Fe, [data-review-id]").length;
+      const container = containers.find(
+        (el) => el && el.scrollHeight > window.innerHeight
+      ) || document.documentElement;
+      container.scrollBy(0, 2000);
+      window.scrollBy(0, 2000);
+      return Math.max(container.scrollHeight, document.body.scrollHeight);
     });
-
     await humanDelay(2000, 3500);
-    console.log(`Scrolling... reviews visible so far: ${newCount}`);
-
-    if (newCount >= maxReviews) {
-      console.log(`Reached max review limit (${maxReviews}). Stopping scroll to save memory.`);
-      break;
-    }
-
-    if (newCount === lastCount) {
+    if (newHeight === lastHeight) {
       unchanged++;
       if (unchanged >= 5) break;
     } else {
       unchanged = 0;
     }
-    lastCount = newCount;
+    lastHeight = newHeight;
   }
-  console.log(`Scroll complete. Total visible reviews: ${lastCount}`);
 }
 
 async function expandAllMoreButtons(page) {
@@ -278,13 +251,19 @@ function parseDate(str) {
   return 0;
 }
 
-// ✅ Core scraper runs in background
-async function runScraper(placeId, jobId) {
-  const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
-  console.log(`[Job ${jobId}] Starting scraper for place ID: ${placeId}`);
-
-  const cookies = loadCookies();
-  console.log(`[Job ${jobId}] Loaded ${cookies.length} Google cookies`);
+async function launchBrowser() {
+  const viewports = [
+    { w: 1280, h: 900 }, { w: 1366, h: 768 },
+    { w: 1440, h: 900 }, { w: 1920, h: 1080 },
+  ];
+  const vp = viewports[Math.floor(Math.random() * viewports.length)];
+  const userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  ];
+  const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -295,7 +274,7 @@ async function runScraper(placeId, jobId) {
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--disable-blink-features=AutomationControlled",
-      "--window-size=1280,900",
+      `--window-size=${vp.w},${vp.h}`,
       "--lang=en-US,en",
     ],
   });
@@ -304,6 +283,8 @@ async function runScraper(placeId, jobId) {
   if (existingPages.length > 0) await existingPages[0].close();
 
   const page = await browser.newPage();
+  await page.setViewport({ width: vp.w, height: vp.h });
+  await page.setUserAgent(ua);
 
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
@@ -312,57 +293,105 @@ async function runScraper(placeId, jobId) {
     Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
   });
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-  );
-
-  try {
-    await page.setCookie(...cookies);
-  } catch (e) {
-    console.warn(`[Job ${jobId}] Some cookies failed:`, e.message);
-  }
-
-  await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
-  await humanDelay(3000, 5000);
-
-  const title = await page.title();
-  console.log(`[Job ${jobId}] Page title: "${title}"`);
-
-  if (/verify|unusual traffic|captcha/i.test(title)) {
-    await browser.close();
-    throw new Error("CAPTCHA detected — cookies may be expired. Update at /update-cookies");
-  }
-
-  await waitForReviews(page);
-  await clickLowestRatingFilter(page);
-  await scrollToBottom(page);
-  await expandAllMoreButtons(page);
-  await sleep(1500);
-
-  const reviews = await extractReviews(page);
-  const oneStarReviews = reviews.filter((r) => r.rating_stars === 1);
-  oneStarReviews.sort((a, b) => parseDate(b.review_date) - parseDate(a.review_date));
-
-  await browser.close();
-
-  return {
-    scraped_at: new Date().toISOString(),
-    place_id: placeId,
-    filter: "1-star reviews only",
-    sort: "newest first",
-    total_one_star_reviews: oneStarReviews.length,
-    reviews: oneStarReviews,
-  };
+  return { browser, page };
 }
 
-// ============================================================
-// ROUTES
-// ============================================================
+function isRedirected(title, url) {
+  return (
+    title.startsWith("https://") ||
+    title.startsWith("http://") ||
+    /google\.com\/search/i.test(title) ||
+    /redirected|unusual traffic|verify|captcha/i.test(title)
+  );
+}
 
-// ✅ Home
+async function runScraper(placeId, jobId) {
+  const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
+  console.log(`[Job ${jobId}] Starting scraper for place ID: ${placeId}`);
+
+  const cookies = loadCookies();
+  console.log(`[Job ${jobId}] Loaded ${cookies.length} Google cookies`);
+
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    let browser;
+    try {
+      console.log(`[Job ${jobId}] Attempt ${attempt}/${MAX_RETRIES}`);
+
+      if (attempt > 1) {
+        const waitMs = attempt * 8000;
+        console.log(`[Job ${jobId}] Waiting ${waitMs/1000}s before retry...`);
+        await sleep(waitMs);
+      }
+
+      const { browser: b, page } = await launchBrowser();
+      browser = b;
+
+      try {
+        await page.setCookie(...cookies);
+      } catch (e) {
+        console.warn(`[Job ${jobId}] Some cookies failed:`, e.message);
+      }
+
+      if (attempt > 1) {
+        console.log(`[Job ${jobId}] Warming up session on google.com...`);
+        await page.goto("https://www.google.com", { waitUntil: "networkidle2", timeout: 30000 });
+        await humanDelay(3000, 5000);
+      }
+
+      await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
+      await humanDelay(3000, 5000);
+
+      const title = await page.title();
+      console.log(`[Job ${jobId}] Page title: "${title}"`);
+
+      if (isRedirected(title)) {
+        console.warn(`[Job ${jobId}] Google redirected us on attempt ${attempt}. Retrying...`);
+        await browser.close();
+        browser = null;
+        continue;
+      }
+
+      if (/verify|unusual traffic|captcha/i.test(title)) {
+        await browser.close();
+        throw new Error("CAPTCHA detected — cookies may be expired. Update at /update-cookies");
+      }
+
+      await waitForReviews(page);
+      await clickLowestRatingFilter(page);
+      await scrollToBottom(page);
+      await expandAllMoreButtons(page);
+      await sleep(1500);
+
+      const reviews = await extractReviews(page);
+      const oneStarReviews = reviews.filter((r) => r.rating_stars === 1);
+      oneStarReviews.sort((a, b) => parseDate(b.review_date) - parseDate(a.review_date));
+
+      await browser.close();
+
+      return {
+        scraped_at: new Date().toISOString(),
+        place_id: placeId,
+        filter: "1-star reviews only",
+        sort: "newest first",
+        total_one_star_reviews: oneStarReviews.length,
+        reviews: oneStarReviews,
+      };
+
+    } catch (err) {
+      if (browser) await browser.close().catch(() => {});
+      if (attempt === MAX_RETRIES) throw err;
+      console.warn(`[Job ${jobId}] Error on attempt ${attempt}: ${err.message}`);
+    }
+  }
+
+  throw new Error("All retries failed. Google may be blocking this Place ID temporarily.");
+}
+
 app.get("/", (req, res) => {
   res.json({
-    status: "✅ Scraper API is running",
+    status: "Scraper API is running",
     endpoints: {
       scrape: "GET /scrape?placeid=YOUR_PLACE_ID",
       result: "GET /result/:job_id",
@@ -372,7 +401,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// ✅ Start scrape job
 app.get("/scrape", async (req, res) => {
   const placeId = req.query.placeid;
   if (!placeId) {
@@ -395,22 +423,20 @@ app.get("/scrape", async (req, res) => {
   runScraper(placeId, jobId)
     .then((result) => {
       jobs[jobId] = { status: "done", ...result };
-      console.log(`[Job ${jobId}] ✅ Complete! Found ${result.total_one_star_reviews} reviews.`);
+      console.log(`[Job ${jobId}] Complete! Found ${result.total_one_star_reviews} reviews.`);
     })
     .catch((err) => {
       jobs[jobId] = { status: "error", error: err.message };
-      console.error(`[Job ${jobId}] ❌ Error:`, err.message);
+      console.error(`[Job ${jobId}] Error:`, err.message);
     });
 });
 
-// ✅ Poll result
 app.get("/result/:jobId", (req, res) => {
   const job = jobs[req.params.jobId];
   if (!job) return res.status(404).json({ error: "Job not found." });
   res.json(job);
 });
 
-// ✅ Cookie update page (GET - show form)
 app.get("/update-cookies", (req, res) => {
   const currentCookies = loadCookies();
   const source = cookieOverride
@@ -446,12 +472,12 @@ app.get("/update-cookies", (req, res) => {
 </head>
 <body>
   <div class="card">
-    <h1>🍪 Update Google Cookies</h1>
+    <h1>Update Google Cookies</h1>
     <p class="subtitle">Update cookies when scraping stops working</p>
 
     <div class="status">
-      ✅ Currently active: <strong>${currentCookies.length} Google cookies</strong><br>
-      📂 Source: <strong>${source}</strong>
+      Currently active: <strong>${currentCookies.length} Google cookies</strong><br>
+      Source: <strong>${source}</strong>
     </div>
 
     <div class="steps">
@@ -469,7 +495,7 @@ app.get("/update-cookies", (req, res) => {
       <label>Paste New Cookies (Netscape format)</label>
       <textarea name="cookies" placeholder="# Netscape HTTP Cookie File&#10;.google.com	TRUE	/	TRUE	..."></textarea>
 
-      <button type="submit">✅ Update Cookies Now</button>
+      <button type="submit">Update Cookies Now</button>
     </form>
   </div>
 </body>
@@ -477,14 +503,13 @@ app.get("/update-cookies", (req, res) => {
   `);
 });
 
-// ✅ Cookie update (POST - save cookies to memory)
 app.post("/update-cookies", (req, res) => {
   const { password, cookies } = req.body;
 
   if (password !== ADMIN_PASSWORD) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ Wrong password</h2>
+        <h2 style="color:red">Wrong password</h2>
         <a href="/update-cookies">← Try again</a>
       </body></html>
     `);
@@ -493,7 +518,7 @@ app.post("/update-cookies", (req, res) => {
   if (!cookies || cookies.trim().length < 50) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ No cookies provided</h2>
+        <h2 style="color:red">No cookies provided</h2>
         <a href="/update-cookies">← Try again</a>
       </body></html>
     `);
@@ -504,7 +529,7 @@ app.post("/update-cookies", (req, res) => {
   if (parsed.length === 0) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ No valid Google cookies found</h2>
+        <h2 style="color:red">No valid Google cookies found</h2>
         <p>Make sure you exported in Netscape format and are logged into Google.</p>
         <a href="/update-cookies">← Try again</a>
       </body></html>
@@ -512,14 +537,14 @@ app.post("/update-cookies", (req, res) => {
   }
 
   cookieOverride = cookies;
-  console.log(`✅ Cookies updated via web form! ${parsed.length} Google cookies now active.`);
+  console.log(`Cookies updated via web form! ${parsed.length} Google cookies now active.`);
 
   res.send(`
     <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-      <h2 style="color:green">✅ Cookies updated successfully!</h2>
+      <h2 style="color:green">Cookies updated successfully!</h2>
       <p style="margin:12px 0;color:#555">${parsed.length} Google cookies are now active.</p>
       <p style="color:#f57c00;font-size:13px;margin-top:12px">
-        ⚠️ These cookies are in memory only.<br>
+        These cookies are in memory only.<br>
         For permanent storage: copy the cookie text into<br>
         <strong>Heroku → Settings → Config Vars → GOOGLE_COOKIES</strong>
       </p>
@@ -530,7 +555,7 @@ app.post("/update-cookies", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Scraper API running on port ${PORT}`);
+  console.log(`Scraper API running on port ${PORT}`);
   console.log(`Step 1: GET /scrape?placeid=YOUR_PLACE_ID`);
   console.log(`Step 2: GET /result/:job_id`);
   console.log(`Admin:  GET /update-cookies (password: ${ADMIN_PASSWORD})`);

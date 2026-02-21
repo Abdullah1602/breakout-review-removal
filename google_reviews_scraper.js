@@ -1,4 +1,6 @@
-require("dotenv").config();
+
+try { require("dotenv").config(); } catch (_) {}
+
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
@@ -9,13 +11,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
-// Admin password to protect /update-cookies page
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-// ✅ In-memory job store
+
 const jobs = {};
 
-// ✅ In-memory cookie override (set via /update-cookies form)
 let cookieOverride = null;
 
 app.use(express.urlencoded({ extended: true }));
@@ -44,7 +44,6 @@ function parseCookieText(text) {
   return cookies;
 }
 
-// ✅ Cookie loader — checks 3 sources in order
 function loadCookies() {
   if (cookieOverride) {
     console.log("Using cookies from web form update");
@@ -116,34 +115,62 @@ async function clickLowestRatingFilter(page) {
 }
 
 async function scrollToBottom(page) {
-  let lastHeight = 0;
+  let lastCount = 0;
   let unchanged = 0;
+
   while (true) {
-    const newHeight = await page.evaluate(() => {
-      const containers = [
-        document.querySelector("div[role='main']"),
-        document.querySelector(".review-dialog-list"),
-        document.querySelector("[jsname='Wye04d']"),
-        document.querySelector("[jsname='ScCUV']"),
-        document.querySelector("c-wiz"),
-        document.documentElement,
+    const newCount = await page.evaluate(() => {
+      // Try all known Google review scroll containers
+      const selectors = [
+        "div[jsname='Wye04d']",
+        "div[jsname='ScCUV']",
+        ".review-dialog-list",
+        "div[role='main'] > div > div",
+        "c-wiz",
       ];
-      const container = containers.find(
-        (el) => el && el.scrollHeight > window.innerHeight
-      ) || document.documentElement;
-      container.scrollBy(0, 2000);
-      window.scrollBy(0, 2000);
-      return Math.max(container.scrollHeight, document.body.scrollHeight);
+
+      let scrolled = false;
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.scrollHeight > el.clientHeight + 100) {
+          el.scrollBy(0, 3000);
+          scrolled = true;
+          break;
+        }
+      }
+
+      // Also scroll any div that is tall and scrollable
+      if (!scrolled) {
+        const allDivs = Array.from(document.querySelectorAll("div"));
+        for (const div of allDivs) {
+          if (div.scrollHeight > div.clientHeight + 500 && div.clientHeight > 300) {
+            div.scrollBy(0, 3000);
+            break;
+          }
+        }
+      }
+
+      // Also scroll the page itself
+      window.scrollBy(0, 3000);
+
+      // Return current number of review elements as progress indicator
+      return document.querySelectorAll(".Vpc5Fe, [data-review-id]").length;
     });
-    await humanDelay(2000, 3500);
-    if (newHeight === lastHeight) {
+
+    await humanDelay(2500, 4000);
+
+    console.log(`Scrolling... reviews visible so far: ${newCount}`);
+
+    if (newCount === lastCount) {
       unchanged++;
       if (unchanged >= 5) break;
     } else {
       unchanged = 0;
     }
-    lastHeight = newHeight;
+    lastCount = newCount;
   }
+
+  console.log(`Scroll complete. Total visible reviews: ${lastCount}`);
 }
 
 async function expandAllMoreButtons(page) {
@@ -254,7 +281,6 @@ function parseDate(str) {
   return 0;
 }
 
-// ✅ Core scraper runs in background
 async function runScraper(placeId, jobId) {
   const BASE_URL = `https://search.google.com/local/reviews?placeid=${placeId}`;
   console.log(`[Job ${jobId}] Starting scraper for place ID: ${placeId}`);
@@ -331,14 +357,9 @@ async function runScraper(placeId, jobId) {
   };
 }
 
-// ============================================================
-// ROUTES
-// ============================================================
-
-// ✅ Home
 app.get("/", (req, res) => {
   res.json({
-    status: "✅ Scraper API is running",
+    status: "Scraper API is running",
     endpoints: {
       scrape: "GET /scrape?placeid=YOUR_PLACE_ID",
       result: "GET /result/:job_id",
@@ -348,7 +369,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// ✅ Start scrape job
 app.get("/scrape", async (req, res) => {
   const placeId = req.query.placeid;
   if (!placeId) {
@@ -371,22 +391,20 @@ app.get("/scrape", async (req, res) => {
   runScraper(placeId, jobId)
     .then((result) => {
       jobs[jobId] = { status: "done", ...result };
-      console.log(`[Job ${jobId}] ✅ Complete! Found ${result.total_one_star_reviews} reviews.`);
+      console.log(`[Job ${jobId}] Complete! Found ${result.total_one_star_reviews} reviews.`);
     })
     .catch((err) => {
       jobs[jobId] = { status: "error", error: err.message };
-      console.error(`[Job ${jobId}] ❌ Error:`, err.message);
+      console.error(`[Job ${jobId}] Error:`, err.message);
     });
 });
 
-// ✅ Poll result
 app.get("/result/:jobId", (req, res) => {
   const job = jobs[req.params.jobId];
   if (!job) return res.status(404).json({ error: "Job not found." });
   res.json(job);
 });
 
-// ✅ Cookie update page (GET - show form)
 app.get("/update-cookies", (req, res) => {
   const currentCookies = loadCookies();
   const source = cookieOverride
@@ -422,12 +440,12 @@ app.get("/update-cookies", (req, res) => {
 </head>
 <body>
   <div class="card">
-    <h1>🍪 Update Google Cookies</h1>
+    <h1>Update Google Cookies</h1>
     <p class="subtitle">Update cookies when scraping stops working</p>
 
     <div class="status">
-      ✅ Currently active: <strong>${currentCookies.length} Google cookies</strong><br>
-      📂 Source: <strong>${source}</strong>
+      Currently active: <strong>${currentCookies.length} Google cookies</strong><br>
+      Source: <strong>${source}</strong>
     </div>
 
     <div class="steps">
@@ -445,7 +463,7 @@ app.get("/update-cookies", (req, res) => {
       <label>Paste New Cookies (Netscape format)</label>
       <textarea name="cookies" placeholder="# Netscape HTTP Cookie File&#10;.google.com	TRUE	/	TRUE	..."></textarea>
 
-      <button type="submit">✅ Update Cookies Now</button>
+      <button type="submit">Update Cookies Now</button>
     </form>
   </div>
 </body>
@@ -453,14 +471,13 @@ app.get("/update-cookies", (req, res) => {
   `);
 });
 
-// ✅ Cookie update (POST - save cookies to memory)
 app.post("/update-cookies", (req, res) => {
   const { password, cookies } = req.body;
 
   if (password !== ADMIN_PASSWORD) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ Wrong password</h2>
+        <h2 style="color:red">Wrong password</h2>
         <a href="/update-cookies">← Try again</a>
       </body></html>
     `);
@@ -469,7 +486,7 @@ app.post("/update-cookies", (req, res) => {
   if (!cookies || cookies.trim().length < 50) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ No cookies provided</h2>
+        <h2 style="color:red">No cookies provided</h2>
         <a href="/update-cookies">← Try again</a>
       </body></html>
     `);
@@ -480,7 +497,7 @@ app.post("/update-cookies", (req, res) => {
   if (parsed.length === 0) {
     return res.send(`
       <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2 style="color:red">❌ No valid Google cookies found</h2>
+        <h2 style="color:red">No valid Google cookies found</h2>
         <p>Make sure you exported in Netscape format and are logged into Google.</p>
         <a href="/update-cookies">← Try again</a>
       </body></html>
@@ -488,14 +505,14 @@ app.post("/update-cookies", (req, res) => {
   }
 
   cookieOverride = cookies;
-  console.log(`✅ Cookies updated via web form! ${parsed.length} Google cookies now active.`);
+  console.log(`Cookies updated via web form! ${parsed.length} Google cookies now active.`);
 
   res.send(`
     <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-      <h2 style="color:green">✅ Cookies updated successfully!</h2>
+      <h2 style="color:green">Cookies updated successfully!</h2>
       <p style="margin:12px 0;color:#555">${parsed.length} Google cookies are now active.</p>
       <p style="color:#f57c00;font-size:13px;margin-top:12px">
-        ⚠️ These cookies are in memory only.<br>
+        These cookies are in memory only.<br>
         For permanent storage: copy the cookie text into<br>
         <strong>Heroku → Settings → Config Vars → GOOGLE_COOKIES</strong>
       </p>
@@ -506,7 +523,7 @@ app.post("/update-cookies", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Scraper API running on port ${PORT}`);
+  console.log(`Scraper API running on port ${PORT}`);
   console.log(`Step 1: GET /scrape?placeid=YOUR_PLACE_ID`);
   console.log(`Step 2: GET /result/:job_id`);
   console.log(`Admin:  GET /update-cookies (password: ${ADMIN_PASSWORD})`);
